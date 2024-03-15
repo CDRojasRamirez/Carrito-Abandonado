@@ -1,5 +1,13 @@
 import { Injectable } from '@nestjs/common';
 import axios, { AxiosResponse } from 'axios';
+import {
+  DataVtexDto,
+  DataCompraVtexDto,
+  Item,
+  Datasend,
+  Postsend,
+} from './dto/create-carritoabandonado.dto';
+import * as moment from 'moment';
 
 @Injectable()
 export class CarritoabandonadoService {
@@ -15,19 +23,27 @@ export class CarritoabandonadoService {
           client_secret: 'QkngX4gxSXSGUcuD2BvWHZHB',
         },
       );
+      console.log(response.data.access_token);
       return response.data.access_token;
     } catch (error) {
       throw new Error('Error al obtener el token de acceso');
     }
   }
-  async getProductDetails(
-    skus: string[],
-    email: string,
-    accountId: string,
-    sessionDate: string,
-  ): Promise<any[]> {
+  async getProductDetails(dataVtexDto: DataVtexDto): Promise<Postsend[]> {
     try {
       const accessToken = await this.getAccessToken();
+      const rclastcart = dataVtexDto.rclastcart;
+      const phone = dataVtexDto.phone;
+      const matches = rclastcart.match(/sku=([^&]+)/g);
+      const accountId = dataVtexDto.accountId;
+      const sessionDate = moment(dataVtexDto.rclastsessiondate).format(
+        'YYYY-MM-DD',
+      );
+      const email = dataVtexDto.email;
+      const skus = matches ? matches.map((match) => match.split('=')[1]) : [];
+      if (!skus.length) {
+        return;
+      }
       const productDetailsPromises = skus.map(async (skuValue: string) => {
         const response = await axios.get(
           `https://footloose.vtexcommercestable.com.br/api/catalog_system/pub/products/search?fq=skuId:${skuValue}`,
@@ -37,7 +53,18 @@ export class CarritoabandonadoService {
             },
           },
         );
-        const productName = response.data[0].productName;
+        const profile = await axios.get(
+          `https://footloose.myvtex.com/api/checkout/pub/profiles?email=${email}&ensureComplete=false`,
+          {
+            headers: {
+              Accept: 'application/json',
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+          },
+        );
+        const dni = profile?.data?.userProfile?.document || '00000000';
+        const productName = response?.data[0]?.productName;
         const imageUrl = response.data[0].items[0].images[0].imageUrl;
         let listPrice =
           response.data[0].items[0].sellers[0].commertialOffer.ListPrice;
@@ -48,20 +75,19 @@ export class CarritoabandonadoService {
         }
 
         return {
-          email,
+          dni,
           productName,
           imageUrl,
           listPrice,
           price,
-          accountId,
           sku: skuValue,
           flag: false,
-          sessionDate,
         };
       });
       const productDetails = await Promise.all(productDetailsPromises);
       await this.sendDataToEndpoint(
         productDetails,
+        phone,
         email,
         accountId,
         sessionDate,
@@ -69,99 +95,157 @@ export class CarritoabandonadoService {
       );
       return productDetails;
     } catch (error) {
-      throw new Error('Error al obtener detalles de los productos');
+      throw new Error(error);
     }
   }
 
   private async sendDataToEndpoint(
-    productDetails: any[],
+    productDetails: Postsend[],
+    phone: string,
     email: string,
     accountId: string,
     sessionDate: string,
     accessToken: string,
   ): Promise<void> {
     try {
-      const dataToSend = {
-        items: productDetails.map((product: any) => {
+      const apiEvent = 'APIEvent-873bb9e4-ea34-39cf-e81c-694e8d241086';
+      const dataDetalles_CarritoAbandonado = {
+        items: productDetails.map((product: Postsend) => {
           return {
             email,
             productName: product.productName,
             imageUrl: product.imageUrl,
             listPrice: product.listPrice,
             price: product.price,
-            accountId,
             sku: product.sku,
-            flag: product.flag,
-            fechaCarrito: sessionDate,
             sessionDate,
+            flag: product.flag,
           };
         }),
       };
-
-      await axios.post(
-        'https://mccpl-f2jqb2j21shfrqv655qlv4.rest.marketingcloudapis.com/data/v1/async/dataextensions/key:868EFB5B-769F-46C3-9C8B-BA9CC5ACF4F7/rows',
-        dataToSend,
+      const dni = productDetails[0].dni;
+      const dataPrincipal_CarritoAbandonado = {
+        ContactKey: email,
+        EventDefinitionKey: apiEvent,
+        Data: {
+          dni,
+          email,
+          accountId,
+          flag: false,
+          phone,
+        },
+      };
+      console.log(dataPrincipal_CarritoAbandonado);
+      const res = await axios.post(
+        'https://mccpl-f2jqb2j21shfrqv655qlv4.rest.marketingcloudapis.com/data/v1/async/dataextensions/key:281AFE6D-7146-41AC-9CAE-CA0E3F5CC0EC/rows',
+        dataDetalles_CarritoAbandonado,
         {
           headers: {
             Authorization: `Bearer ${accessToken}`,
           },
         },
       );
-
-      console.log('Datos enviados correctamente al endpoint.');
+      console.log(res);
+      const accessToken2 = await this.getAccessToken();
+      console.log(accessToken);
+      console.log(accessToken2);
+      const res2 = await axios
+        .post(
+          'https://mccpl-f2jqb2j21shfrqv655qlv4.rest.marketingcloudapis.com/interaction/v1/events',
+          dataPrincipal_CarritoAbandonado,
+          {
+            headers: {
+              Accept: 'application/json',
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+            },
+          },
+        )
+        .catch((err) => console.log(err));
+      console.log(res2);
     } catch (error) {
       throw new Error('Error al enviar los datos al endpoint');
     }
   }
   async updateProductDetails(
-    skus: string[],
-    accountId: string,
-  ): Promise<any[]> {
+    dataCompraVtexDto: DataCompraVtexDto,
+  ): Promise<Datasend[]> {
     try {
       const accessToken = await this.getAccessToken();
-      const productDetailsPromises = skus.map(async (skuValue: string) => {
-        return {
-          accountId,
-          sku: skuValue,
-          flag: true,
-        };
-      });
-      const productDetails = await Promise.all(productDetailsPromises);
+      if (dataCompraVtexDto.State === 'invoiced') {
+        const orderId = dataCompraVtexDto.OrderId;
+        const response = await axios.get(
+          `https://footloose.vtexcommercestable.com.br/api/oms/pvt/orders/${orderId}`,
+          {
+            headers: {
+              Accept: 'application/json',
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${accessToken}`,
+              'X-VTEX-API-AppKey': 'vtexappkey-passarelape-QPQROX',
+              'X-VTEX-API-AppToken':
+                'RZXREUHANNXUWVJVHAWQAZIGNCBBSSYFFCVHCQXCAUXBYOGBJTJYICSORWLZKDYDWHHQTQLPVSGAWUVCQNLLCVDJRQPXTPPLLEQKILXGICLZDJNRYRHCLCMPWZVTMCZH',
+            },
+          },
+        );
 
-      await this.updateDataToEndpoint(productDetails, accountId, accessToken);
-      return productDetails;
+        const skus = response.data.items.map((item: Item) => item.sellerSku);
+        const dni = response.data.clientProfileData.document || '00000000';
+        if (!skus.length) {
+          return;
+        }
+        const productDetailsPromises = skus.map(async (skuValue: string) => {
+          return {
+            dni: dni,
+            email: response.data.clientProfileData.email,
+            sku: skuValue,
+            flag: true,
+          };
+        });
+        const productDetails = await Promise.all(productDetailsPromises);
+        await this.updateDataToEndpoint(productDetails, accessToken);
+        return productDetails;
+      }
     } catch (error) {
-      throw new Error('Error al obtener detalles de los productos');
+      throw new Error(error);
     }
   }
   private async updateDataToEndpoint(
-    productDetails: any[],
-    accountId: string,
+    productDetails: Datasend[],
     accessToken: string,
-  ): Promise<AxiosResponse> {
+  ): Promise<void> {
     try {
-      const dataToUpdate = {
-        items: productDetails.map((product: any) => {
+      const dataUpdatePrincipal_CarritoAbandonado = {
+        items: [
+          {
+            email: productDetails[0].email,
+            flag: true,
+          },
+        ],
+      };
+      const dataUpdateDetalles_CarritoAbandonado = {
+        items: productDetails.map((product: Datasend) => {
           return {
-            accountId,
+            email: product.email,
             sku: product.sku,
-            flag: product.flag,
+            flag: true,
           };
         }),
       };
-      const response: AxiosResponse = await axios.put(
-        'https://mccpl-f2jqb2j21shfrqv655qlv4.rest.marketingcloudapis.com/data/v1/async/dataextensions/key:868EFB5B-769F-46C3-9C8B-BA9CC5ACF4F7/rows',
-        dataToUpdate,
+      const response = await axios.put(
+        'https://mccpl-f2jqb2j21shfrqv655qlv4.rest.marketingcloudapis.com/data/v1/async/dataextensions/key:281AFE6D-7146-41AC-9CAE-CA0E3F5CC0EC/rows',
+        dataUpdateDetalles_CarritoAbandonado,
         {
           headers: {
             Authorization: `Bearer ${accessToken}`,
           },
         },
       );
+
+      console.log(response);
       if (response && response.status === 202) {
         const requestId = response.data.requestId;
         console.log('ID de solicitud:', requestId);
-        const res: AxiosResponse = await axios.get(
+        const res = await axios.get(
           `https://mccpl-f2jqb2j21shfrqv655qlv4.rest.marketingcloudapis.com/data/v1/async/${requestId}/results`,
           {
             headers: {
@@ -171,8 +255,19 @@ export class CarritoabandonadoService {
         );
         console.log(res.data);
       }
+
+      const response2 = await axios.put(
+        'https://mccpl-f2jqb2j21shfrqv655qlv4.rest.marketingcloudapis.com/data/v1/async/dataextensions/key:FA6F3610-AE27-45DA-83B5-E7A868AFDA60/rows',
+        dataUpdatePrincipal_CarritoAbandonado,
+        {
+          headers: {
+            Authorization: `Bearer ${accessToken}`,
+          },
+        },
+      );
+      console.log(response2);
       console.log('Datos enviados correctamente al endpoint.');
-      return response;
+      return response.data;
     } catch (error) {
       console.error('Error al enviar los datos al endpoint:', error);
       throw error;
